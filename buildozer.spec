@@ -6,6 +6,7 @@ package.domain = com.hussein
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 source.include_patterns = assets/*,images/*
+source.exclude_patterns = .buildozer,bin,__pycache__,*.pyc,*.pyo,.git,.github
 
 version = 2.0.0
 
