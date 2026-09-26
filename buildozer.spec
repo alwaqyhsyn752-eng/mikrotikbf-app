@@ -9,7 +9,7 @@ source.include_patterns = assets/*,images/*
 
 version = 2.0.0
 
-requirements = python3,kivy,aiohttp,beautifulsoup4,colorama,chardet,idna,multidict,async-timeout,yarl,attrs,typing-extensions,aiosignal,frozenlist,charset-normalizer,soupsieve,certifi
+requirements = python3,kivy,requests,urllib3,certifi,chardet,idna,beautifulsoup4,soupsieve,colorama,charset-normalizer
 
 orientation = portrait
 fullscreen = 0
