@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -23,16 +24,9 @@ jobs:
             autoconf libtool pkg-config zlib1g-dev libncurses-dev \
             cmake libffi-dev libssl-dev
 
-      - name: Build APK
-  run: |
-    set +e
-    printf 'y\n%.0s' {1..100} | buildozer android debug
-    BUILD_EXIT=$?
-    set -e
-    if [ $BUILD_EXIT -ne 0 ]; then
-      echo "Buildozer exited with code $BUILD_EXIT"
-      exit $BUILD_EXIT
-    fi
+      - name: Install buildozer
+        run: |
+          pip install buildozer cython==0.29.36
 
       - name: Cache buildozer
         uses: actions/cache@v3
@@ -44,10 +38,26 @@ jobs:
 
       - name: Build APK
         run: |
-          yes | buildozer android debug
+          set +e
+          printf 'y\n%.0s' {1..100} | buildozer android debug
+          BUILD_EXIT=$?
+          set -e
+          if [ $BUILD_EXIT -ne 0 ]; then
+            echo "Buildozer exited with code $BUILD_EXIT"
+            exit $BUILD_EXIT
+          fi
+
+      - name: Check APK exists
+        run: |
+          ls -la bin/
+          if [ ! -f bin/*.apk ]; then
+            echo "No APK found!"
+            exit 1
+          fi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: MikrotikBF-APK
           path: bin/*.apk
+          if-no-files-found: error
