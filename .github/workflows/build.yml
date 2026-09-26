@@ -8,7 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -39,7 +39,7 @@ jobs:
       - name: Build APK
         run: |
           set +e
-          printf 'y\n%.0s' {1..100} | buildozer android debug
+          printf 'y\n%.0s' {1..200} | buildozer android debug
           BUILD_EXIT=$?
           set -e
           if [ $BUILD_EXIT -ne 0 ]; then
@@ -61,3 +61,4 @@ jobs:
           name: MikrotikBF-APK
           path: bin/*.apk
           if-no-files-found: error
+          retention-days: 30
