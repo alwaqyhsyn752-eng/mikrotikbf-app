@@ -23,9 +23,16 @@ jobs:
             autoconf libtool pkg-config zlib1g-dev libncurses-dev \
             cmake libffi-dev libssl-dev
 
-      - name: Install buildozer
-        run: |
-          pip install buildozer cython==0.29.36
+      - name: Build APK
+  run: |
+    set +e
+    printf 'y\n%.0s' {1..100} | buildozer android debug
+    BUILD_EXIT=$?
+    set -e
+    if [ $BUILD_EXIT -ne 0 ]; then
+      echo "Buildozer exited with code $BUILD_EXIT"
+      exit $BUILD_EXIT
+    fi
 
       - name: Cache buildozer
         uses: actions/cache@v3
